@@ -1,0 +1,143 @@
+#######Script de instalação automatizada do GLPI 10.0.15 no Ubuntu 22.04 LTS#########
+##############################Por Hesley Magno#######################################
+
+#!/bin/bash
+
+# Atualiza a lista de pacotes disponíveis e atualiza o sistema
+echo "Atualizando o sistema..."
+sudo apt update && sudo apt upgrade -y
+
+# Instala dependências do GLPI
+echo "Instalando dependências..."
+sudo apt install -y apache2 php php-{apcu,cli,common,curl,gd,imap,ldap,mysql,xmlrpc,xml,mbstring,bcmath,intl,zip,redis,bz2} libapache2-mod-php php-soap php-cas mariadb-server
+
+# Baixa a versão mais recente do GLPI
+echo "Baixando GLPI 10.0.15..."
+wget -O glpi-10.0.15.tgz https://github.com/glpi-project/glpi/releases/download/10.0.15/glpi-10.0.15.tgz
+
+# Extrai o arquivo baixado
+echo "Extraindo GLPI..."
+tar -xzf glpi-10.0.15.tgz
+
+# Move o GLPI para o diretório do Apache
+echo "Movendo GLPI para o diretório do Apache..."
+sudo mv glpi /var/www/html/glpi
+
+# Define permissões
+echo "Definindo permissões..."
+sudo chown -R www-data:www-data /var/www/html/glpi
+sudo chmod -R 755 /var/www/html/glpi
+
+# Importa informações de fuso horário no banco de dados MySQL
+echo "Importando informações de fuso horário para o banco de dados MySQL..."
+mysql_tzinfo_to_sql /usr/share/zoneinfo | sudo mysql -u root mysql
+
+# Configura o banco de dados e usuário para o GLPI
+echo "Configurando banco de dados..."
+sudo mysql -u root -e "CREATE DATABASE glpi;"
+sudo mysql -u root -e "CREATE USER 'glpiuser'@'localhost' IDENTIFIED BY 'password';"
+sudo mysql -u root -e "GRANT ALL PRIVILEGES ON glpi.* TO 'glpiuser'@'localhost';"
+sudo mysql -u root -e "GRANT SELECT ON `mysql`.`time_zone_name` TO 'glpi'@'localhost';"
+sudo mysql -u root -e "FLUSH PRIVILEGES;"
+
+# Cria o arquivo downstream.php com as definições solicitadas
+echo "Criando o arquivo downstream.php..."
+sudo bash -c 'cat > /var/www/html/glpi/inc/downstream.php <<EOF
+<?php
+define("GLPI_CONFIG_DIR", "/etc/glpi/");
+if (file_exists(GLPI_CONFIG_DIR . "/local_define.php")) {
+    require_once GLPI_CONFIG_DIR . "/local_define.php";
+}
+EOF'
+
+# Move diretórios de configuração, arquivos e logs do GLPI
+echo "Movendo diretórios de configuração, arquivos e logs do GLPI..."
+sudo mv /var/www/html/glpi/config /etc/glpi
+sudo mv /var/www/html/glpi/files /var/lib/glpi
+sudo mv /var/lib/glpi/_log /var/log/glpi
+
+# Cria o arquivo local_define.php com as definições solicitadas
+echo "Criando o arquivo local_define.php..."
+sudo bash -c 'cat > /etc/glpi/local_define.php <<EOF
+<?php
+define("GLPI_VAR_DIR", "/var/lib/glpi");
+define("GLPI_DOC_DIR", GLPI_VAR_DIR);
+define("GLPI_CRON_DIR", GLPI_VAR_DIR . "/_cron");
+define("GLPI_DUMP_DIR", GLPI_VAR_DIR . "/_dumps");
+define("GLPI_GRAPH_DIR", GLPI_VAR_DIR . "/_graphs");
+define("GLPI_LOCK_DIR", GLPI_VAR_DIR . "/_lock");
+define("GLPI_PICTURE_DIR", GLPI_VAR_DIR . "/_pictures");
+define("GLPI_PLUGIN_DOC_DIR", GLPI_VAR_DIR . "/_plugins");
+define("GLPI_RSS_DIR", GLPI_VAR_DIR . "/_rss");
+define("GLPI_SESSION_DIR", GLPI_VAR_DIR . "/_sessions");
+define("GLPI_TMP_DIR", GLPI_VAR_DIR . "/_tmp");
+define("GLPI_UPLOAD_DIR", GLPI_VAR_DIR . "/_uploads");
+define("GLPI_CACHE_DIR", GLPI_VAR_DIR . "/_cache");
+define("GLPI_LOG_DIR", "/var/log/glpi");
+EOF'
+
+# Ajusta permissões após a movimentação
+echo "Ajustando permissões..."
+sudo chown root:root /var/www/html/glpi/ -R
+sudo chown www-data:www-data /etc/glpi -R
+sudo chown www-data:www-data /var/lib/glpi -R
+sudo chown www-data:www-data /var/log/glpi -R
+sudo chown www-data:www-data /var/www/html/glpi/marketplace -Rf
+sudo find /var/www/html/glpi/ -type f -exec chmod 0644 {} \;
+sudo find /var/www/html/glpi/ -type d -exec chmod 0755 {} \;
+sudo find /etc/glpi -type f -exec chmod 0644 {} \;
+sudo find /etc/glpi -type d -exec chmod 0755 {} \;
+sudo find /var/lib/glpi -type f -exec chmod 0644 {} \;
+sudo find /var/lib/glpi -type d -exec chmod 0755 {} \;
+sudo find /var/log/glpi -type f -exec chmod 0644 {} \;
+sudo find /var/log/glpi -type d -exec chmod 0755 {} \;
+
+# Configura o Apache
+echo "Configurando o Apache..."
+sudo bash -c 'cat > /etc/apache2/sites-available/glpi.conf <<EOF
+# Start of the VirtualHost configuration for port 80
+
+<VirtualHost *:80>
+    ServerName yourglpi.yourdomain.com
+    # Specify the server's hostname
+    DocumentRoot /var/www/html/glpi/public
+    # The directory where the website's files are located
+    # Start of a Directory directive for the website's directory
+    <Directory /var/www/html/glpi/public>
+        Require all granted
+        # Allow all access to this directory
+        RewriteEngine On
+        # Enable the Apache rewrite engine
+        # Ensure authorization headers are passed to PHP.
+        # Some Apache configurations may filter them and break usage of API, CalDAV, ...
+        RewriteCond %{HTTP:Authorization} ^(.+)$
+        RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+        # Redirect all requests to GLPI router, unless the file exists.
+        RewriteCond %{REQUEST_FILENAME} !-f
+        RewriteRule ^(.*)$ index.php [QSA,L]
+    </Directory>
+    # End of the Directory directive for /var/www/glpi/public
+</VirtualHost>
+
+# End of the VirtualHost configuration for port 80
+EOF'
+
+# Atualiza o arquivo php.ini com os parâmetros especificados
+echo "Atualizando o arquivo php.ini..."
+sudo sed -i 's/^upload_max_filesize = .*/upload_max_filesize = 20M/' /etc/php/8.1/apache2/php.ini
+sudo sed -i 's/^post_max_size = .*/post_max_size = 20M/' /etc/php/8.1/apache2/php.ini
+sudo sed -i 's/^max_execution_time = .*/max_execution_time = 60/' /etc/php/8.1/apache2/php.ini
+sudo sed -i 's/^max_input_vars = .*/max_input_vars = 5000/' /etc/php/8.1/apache2/php.ini
+sudo sed -i 's/^memory_limit = .*/memory_limit = 256M/' /etc/php/8.1/apache2/php.ini
+sudo sed -i 's/^;session.cookie_httponly = .*/session.cookie_httponly = On/' /etc/php/8.1/apache2/php.ini
+sudo sed -i 's/^;date.timezone =.*/date.timezone = America\/Sao_Paulo/' /etc/php/8.1/apache2/php.ini
+
+# Desabilita o site padrão, habilita o mod_rewrite e o site GLPI, e reinicia o Apache
+echo "Configurando o Apache..."
+sudo a2dissite 000-default.conf
+sudo a2enmod rewrite
+sudo a2ensite glpi.conf
+sudo systemctl restart apache2
+
+# Mensagem final
+echo "Instalação do GLPI 10.0.15 concluída! Acesse http://seu_servidor_para_completar_a_instalação_do_GLPI"
